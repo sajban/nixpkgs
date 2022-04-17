@@ -250,7 +250,7 @@ let
         wantedBy = [ "wireguard-${name}.service" ];
         requiredBy = [ "wireguard-${name}.service" ];
         before = [ "wireguard-${name}.service" ];
-        path = with pkgs; [ wireguard-tools ];
+        path = with pkgs; [ cfg.package ];
 
         serviceConfig = {
           Type = "oneshot";
@@ -304,7 +304,7 @@ let
         wantedBy = [ "multi-user.target" "wireguard-${interfaceName}.service" ];
         environment.DEVICE = interfaceName;
         environment.WG_ENDPOINT_RESOLUTION_RETRIES = "infinity";
-        path = with pkgs; [ iproute2 wireguard-tools ];
+        path = with pkgs; [ iproute2 cfg.package ];
 
         serviceConfig =
           if !dynamicRefreshEnabled
@@ -382,7 +382,7 @@ let
         after = [ "network.target" "network-online.target" ];
         wantedBy = [ "multi-user.target" ];
         environment.DEVICE = name;
-        path = with pkgs; [ kmod iproute2 wireguard-tools ];
+        path = with pkgs; [ kmod iproute2 cfg.package ];
 
         serviceConfig = {
           Type = "oneshot";
@@ -441,6 +441,13 @@ in
         example = true;
       };
 
+      package = mkOption {
+        type = types.package;
+        default = pkgs.wireguard-tools;
+        defaultText = literalExpression "pkgs.wireguard-tools";
+        description = "The wireguard package to use";
+      };
+      
       interfaces = mkOption {
         description = "WireGuard interfaces.";
         default = {};
@@ -488,7 +495,7 @@ in
         }) all_peers;
 
     boot.extraModulePackages = optional (versionOlder kernel.kernel.version "5.6") kernel.wireguard;
-    environment.systemPackages = [ pkgs.wireguard-tools ];
+    environment.systemPackages = [ cfg.package ];
 
     systemd.services =
       (mapAttrs' generateInterfaceUnit cfg.interfaces)
