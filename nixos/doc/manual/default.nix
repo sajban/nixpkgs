@@ -3,7 +3,7 @@
 , config
 , version
 , revision
-, extraSources ? []
+, extraSources ? [ ]
 , baseOptionsJSON ? null
 , warningsAreErrors ? true
 , prefix ? ../../..
@@ -37,30 +37,127 @@ let
 
   nixos-lib = import ../../lib { };
 
-  testOptionsDoc = let
+  cleanupLocations = opt: opt // {
+    # Clean up declaration sites to not refer to the NixOS source tree.
+    declarations =
+      map
+        (decl:
+          if hasPrefix (toString ../../..) (toString decl)
+          then
+            let subpath = removePrefix "/" (removePrefix (toString ../../..) (toString decl));
+            in { url = "https://github.com/NixOS/nixpkgs/blob/master/${subpath}"; name = subpath; }
+          else decl)
+        opt.declarations;
+  };
+
+  testOptionsDoc =
+    let
       eval = nixos-lib.evalTest {
         # Avoid evaluating a NixOS config prototype.
         config.node.type = lib.types.deferredModule;
         options._module.args = lib.mkOption { internal = true; };
       };
-    in buildPackages.nixosOptionsDoc {
+    in
+    buildPackages.nixosOptionsDoc {
       inherit (eval) options;
       inherit revision;
-      transformOptions = opt: opt // {
-        # Clean up declaration sites to not refer to the NixOS source tree.
-        declarations =
-          map
-            (decl:
-              if hasPrefix (toString ../../..) (toString decl)
-              then
-                let subpath = removePrefix "/" (removePrefix (toString ../../..) (toString decl));
-                in { url = "https://github.com/NixOS/nixpkgs/blob/master/${subpath}"; name = subpath; }
-              else decl)
-            opt.declarations;
-      };
+      transformOptions = cleanupLocations;
       documentType = "none";
       variablelistId = "test-options-list";
       optionIdPrefix = "test-opt-";
+    };
+
+  toc = builtins.toFile "toc.xml"
+    ''
+      <toc role="chunk-toc">
+        <d:tocentry xmlns:d="http://docbook.org/ns/docbook" linkend="book-nixos-manual"><?dbhtml filename="index.html"?>
+          <d:tocentry linkend="ch-options"><?dbhtml filename="options.html"?></d:tocentry>
+          <d:tocentry linkend="ch-release-notes"><?dbhtml filename="release-notes.html"?></d:tocentry>
+        </d:tocentry>
+      </toc>
+    '';
+
+  manualXsltprocOptions = toString [
+    "--param chapter.autolabel 0"
+    "--param part.autolabel 0"
+    "--param preface.autolabel 0"
+    "--param reference.autolabel 0"
+    "--param section.autolabel 0"
+    "--stringparam html.stylesheet 'style.css overrides.css highlightjs/mono-blue.css'"
+    "--stringparam html.script './highlightjs/highlight.pack.js ./highlightjs/loader.js'"
+    "--param xref.with.number.and.title 0"
+    "--param toc.section.depth 0"
+    "--param generate.consistent.ids 1"
+    "--stringparam admon.style ''"
+    "--stringparam callout.graphics.extension .svg"
+    "--stringparam current.docid manual"
+    "--param chunk.section.depth 0"
+    "--param chunk.first.sections 1"
+    "--param use.id.as.filename 1"
+    "--stringparam chunk.toc ${toc}"
+  ];
+
+  linterFunctions = ''
+    # outputs the context of an xmllint error output
+    # LEN lines around the failing line are printed
+    function context {
+      # length of context
+      local LEN=6
+      # lines to print before error line
+      local BEFORE=4
+
+      # xmllint output lines are:
+      # file.xml:1234: there was an error on line 1234
+      while IFS=':' read -r file line rest; do
+        echo
+        if [[ -n "$rest" ]]; then
+          echo "$file:$line:$rest"
+          local FROM=$(($line>$BEFORE ? $line - $BEFORE : 1))
+          # number lines & filter context
+          nl --body-numbering=a "$file" | sed -n "$FROM,+$LEN p"
+        else
+          if [[ -n "$line" ]]; then
+            echo "$file:$line"
+          else
+            echo "$file"
+          fi
+        fi
+      done
+    }
+
+    function lintrng {
+      xmllint --debug --noout --nonet \
+        --relaxng ${docbook5}/xml/rng/docbook/docbook.rng \
+        "$1" \
+        2>&1 | context 1>&2
+        # ^ redirect assumes xmllint doesn’t print to stdout
+    }
+  '';
+
+  optionalDocs = lib.mapAttrs
+    (name: module:
+      let
+        # This is quite simple for now, but may need stubs for more complex modules.
+        eval = nixos-lib.evalModules {
+          modules = [
+            module
+            { options._module.args = lib.mkOption { internal = true; }; }
+          ];
+        };
+      in
+      buildPackages.nixosOptionsDoc {
+        inherit (eval) options;
+        inherit revision;
+        transformOptions = cleanupLocations;
+        # These are for direct to docbook generation, which we don't use here.
+        documentType = throw "documentType not set";
+        variablelistId = throw "variablelistId not set";
+        optionIdPrefix = throw "optionIdPrefix not set";
+      }
+    )
+    {
+      readOnlyPkgs = ../../modules/misc/nixpkgs/read-only.nix;
+      noLegacyPkgs = ../../modules/misc/nixpkgs/no-legacy.nix;
     };
 
   prepareManualFromMD = ''
@@ -76,21 +173,31 @@ let
       --replace \
         '@NIXOS_OPTIONS_JSON@' \
         ${optionsDoc.optionsJSON}/share/doc/nixos/options.json
+    substituteInPlace ./nixos-optional-modules.md \
+      --replace \
+        '@OPTIONS_JSON_noLegacyPkgs@' \
+        ${optionalDocs.noLegacyPkgs.optionsJSON}/share/doc/nixos/options.json \
+      --replace \
+        '@OPTIONS_JSON_readOnlyPkgs@' \
+        ${optionalDocs.readOnlyPkgs.optionsJSON}/share/doc/nixos/options.json \
+        ;
     substituteInPlace ./development/writing-nixos-tests.section.md \
       --replace \
         '@NIXOS_TEST_OPTIONS_JSON@' \
         ${testOptionsDoc.optionsJSON}/share/doc/nixos/options.json
   '';
 
-in rec {
+in
+rec {
   inherit (optionsDoc) optionsJSON optionsNix optionsDocBook;
 
   # Generate the NixOS manual.
   manualHTML = runCommand "nixos-manual-html"
-    { nativeBuildInputs = [ buildPackages.nixos-render-docs ];
+    {
+      nativeBuildInputs = [ buildPackages.nixos-render-docs ];
       inputs = lib.sourceFilesBySuffices ./. [ ".md" ];
       meta.description = "The NixOS manual in HTML format";
-      allowedReferences = ["out"];
+      allowedReferences = [ "out" ];
     }
     ''
       # Generate the HTML manual.
@@ -129,7 +236,8 @@ in rec {
   manualHTMLIndex = "${manualHTML}/share/doc/nixos/index.html";
 
   manualEpub = runCommand "nixos-manual-epub"
-    { nativeBuildInputs = [ buildPackages.libxml2.bin buildPackages.libxslt.bin buildPackages.zip ];
+    {
+      nativeBuildInputs = [ buildPackages.libxml2.bin buildPackages.libxslt.bin buildPackages.zip ];
       doc = ''
         <book xmlns="http://docbook.org/ns/docbook"
               xmlns:xlink="http://www.w3.org/1999/xlink"
@@ -179,11 +287,12 @@ in rec {
 
   # Generate the NixOS manpages.
   manpages = runCommand "nixos-manpages"
-    { nativeBuildInputs = [
+    {
+      nativeBuildInputs = [
         buildPackages.installShellFiles
         buildPackages.nixos-render-docs
       ];
-      allowedReferences = ["out"];
+      allowedReferences = [ "out" ];
     }
     ''
       # Generate manpages.
